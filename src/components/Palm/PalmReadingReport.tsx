@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Page, Text, View, Document, StyleSheet, Font, Image } from '@react-pdf/renderer';
-import { PalmAnalysisResult } from './Results'; // Assuming the type is exported from Results.tsx
+import type { PalmAnalysisResult } from './Results';
 
 // Register fonts (if custom fonts are needed, otherwise Helvetica is a good default)
 // Font.register({
