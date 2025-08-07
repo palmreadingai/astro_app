@@ -4,6 +4,12 @@ import { Button } from '../UI/button';
 import { CouponStats } from './CouponStats';
 import { CouponTable } from './CouponTable';
 import { CouponForm } from './CouponForm';
+import { MetricsCards } from './MetricsCards';
+import { UserAnalyticsPanel } from './UserAnalyticsPanel';
+import { ServiceUsagePanel } from './ServiceUsagePanel';
+import { RevenuePanel } from './RevenuePanel';
+import { FeedbackPanel } from './FeedbackPanel';
+import { SystemHealthPanel } from './SystemHealthPanel';
 import { supabase } from '../../integrations/supabase/client';
 
 interface Coupon {
@@ -34,9 +40,72 @@ interface CouponAnalytics {
   utilizationRate: string;
 }
 
+interface AdminAnalytics {
+  userMetrics: {
+    totalUsers: number;
+    newUsersThisMonth: number;
+    paidUsers: number;
+    freeUsers: number;
+    activeUsersThisWeek: number;
+    userGrowthData: Array<{ date: string; users: number }>;
+  };
+  serviceUsage: {
+    palmReadings: {
+      total: number;
+      completed: number;
+      processing: number;
+      failed: number;
+      successRate: number;
+    };
+    chatSessions: {
+      total: number;
+      averageMessagesPerSession: number;
+      activeSessionsThisWeek: number;
+    };
+    profiles: {
+      astroProfiles: number;
+      horoscopeProfiles: number;
+      kundliProfiles: number;
+    };
+    messageUsage: {
+      totalMessages: number;
+      averageDailyUsage: number;
+      usersHittingLimits: number;
+    };
+  };
+  revenueMetrics: {
+    totalRevenue: number;
+    revenueThisMonth: number;
+    revenueGrowth: number;
+    averageOrderValue: number;
+    paymentSuccessRate: number;
+    couponImpact: {
+      totalDiscountGiven: number;
+      ordersWithCoupons: number;
+      averageDiscount: number;
+    };
+  };
+  feedbackMetrics: {
+    totalFeedback: number;
+    averageRating: number;
+    ratingDistribution: Array<{ rating: number; count: number }>;
+    categoryBreakdown: Array<{ category: string; count: number }>;
+    pendingFeedback: number;
+  };
+  systemHealth: {
+    palmReadingFailures: number;
+    usersAtMessageLimit: number;
+    storageUsage: {
+      palmImages: number;
+      totalStorage: number;
+    };
+  };
+}
+
 const AdminDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'overview' | 'coupons' | 'create'>('overview');
   const [analytics, setAnalytics] = useState<CouponAnalytics | null>(null);
+  const [adminAnalytics, setAdminAnalytics] = useState<AdminAnalytics | null>(null);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshingAnalytics, setIsRefreshingAnalytics] = useState(false);
@@ -67,22 +136,41 @@ const AdminDashboard: React.FC = () => {
     try {
       console.log('📊 Loading analytics...');
       const session = await supabase.auth.getSession();
-      const response = await fetch(`${supabase.supabaseUrl}/functions/v1/manage-coupons?action=analytics`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.data.session?.access_token}`,
-        },
-      });
+      
+      // Load both coupon analytics and comprehensive admin analytics
+      const [couponResponse, adminResponse] = await Promise.all([
+        fetch(`${supabase.supabaseUrl}/functions/v1/manage-coupons?action=analytics`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.data.session?.access_token}`,
+          },
+        }),
+        fetch(`${supabase.supabaseUrl}/functions/v1/admin-analytics`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.data.session?.access_token}`,
+          },
+        })
+      ]);
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!couponResponse.ok) {
+        throw new Error(`Coupon analytics error! status: ${couponResponse.status}`);
+      }
+      
+      if (!adminResponse.ok) {
+        throw new Error(`Admin analytics error! status: ${adminResponse.status}`);
       }
 
-      const data = await response.json();
-      console.log('📊 Analytics response:', data);
+      const couponData = await couponResponse.json();
+      const adminData = await adminResponse.json();
       
-      setAnalytics(data.analytics);
+      console.log('📊 Coupon analytics response:', couponData);
+      console.log('📊 Admin analytics response:', adminData);
+      
+      setAnalytics(couponData.analytics);
+      setAdminAnalytics(adminData.analytics);
     } catch (error) {
       console.error('Error loading analytics:', error);
       // Set default analytics if API fails
@@ -96,6 +184,7 @@ const AdminDashboard: React.FC = () => {
         totalCapacity: 0,
         utilizationRate: '0'
       });
+      setAdminAnalytics(null);
     } finally {
       if (showLoading) setIsRefreshingAnalytics(false);
     }
@@ -198,11 +287,46 @@ const AdminDashboard: React.FC = () => {
 
       {/* Tab Content */}
       {activeTab === 'overview' && (
-        <CouponStats 
-          analytics={analytics} 
-          onRefresh={() => loadAnalytics(true)}
-          isRefreshing={isRefreshingAnalytics}
-        />
+        <div className="space-y-6">
+          {adminAnalytics ? (
+            <>
+              <MetricsCards 
+                userMetrics={adminAnalytics.userMetrics}
+                revenueMetrics={adminAnalytics.revenueMetrics}
+                serviceUsage={adminAnalytics.serviceUsage}
+                feedbackMetrics={adminAnalytics.feedbackMetrics}
+                onRefresh={() => loadAnalytics(true)}
+                isRefreshing={isRefreshingAnalytics}
+              />
+              
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <UserAnalyticsPanel userMetrics={adminAnalytics.userMetrics} />
+                <ServiceUsagePanel serviceUsage={adminAnalytics.serviceUsage} />
+              </div>
+              
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <RevenuePanel revenueMetrics={adminAnalytics.revenueMetrics} />
+                <FeedbackPanel feedbackMetrics={adminAnalytics.feedbackMetrics} />
+              </div>
+              
+              <SystemHealthPanel 
+                systemHealth={adminAnalytics.systemHealth}
+                serviceUsage={adminAnalytics.serviceUsage}
+              />
+            </>
+          ) : (
+            <div className="text-center py-12">
+              <div className="animate-pulse space-y-4">
+                <div className="h-8 bg-gray-200 rounded w-64 mx-auto"></div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  {[...Array(4)].map((_, i) => (
+                    <div key={i} className="h-24 bg-gray-200 rounded"></div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {activeTab === 'coupons' && (

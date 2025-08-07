@@ -395,7 +395,11 @@ export const CouponForm: React.FC<CouponFormProps> = ({ coupon, onSave, onCancel
                   Cancel
                 </Button>
               )}
-              <Button type="submit" disabled={isSubmitting}>
+              <Button 
+                type="submit" 
+                disabled={isSubmitting}
+                className="bg-gray-900 text-white hover:bg-gray-800 disabled:bg-gray-400"
+              >
                 {isSubmitting 
                   ? (coupon ? 'Updating...' : 'Creating...') 
                   : (coupon ? 'Update Coupon' : 'Create Coupon')

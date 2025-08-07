@@ -128,7 +128,7 @@ export const CouponTable: React.FC<CouponTableProps> = ({ coupons, onRefresh, on
         <Button 
           onClick={onRefresh}
           disabled={isRefreshing}
-          className="flex items-center gap-2"
+          className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
         >
           {isRefreshing ? (
             <>
