@@ -44,7 +44,7 @@ interface CouponUsageStats {
   currency: string;
 }
 
-// Validate admin privileges (basic check - in real app you'd have proper role management)
+// Validate admin privileges using database admin_users table
 async function validateAdminAccess(authHeader: string): Promise<{ valid: boolean; user?: any }> {
   if (!authHeader) {
     return { valid: false };
@@ -58,12 +58,25 @@ async function validateAdminAccess(authHeader: string): Promise<{ valid: boolean
     return { valid: false };
   }
 
-  // For now, we'll use a simple email-based check
-  // In production, you should implement proper role-based access control
-  const adminEmails = Deno.env.get('ADMIN_EMAILS')?.split(',') || [];
-  const isAdmin = adminEmails.includes(user.email || '');
+  // Check if user email exists in admin_users table
+  console.log('🔍 Checking admin status for email:', user.email);
+  
+  const { data: adminUser, error: adminError } = await supabase
+    .from('admin_users')
+    .select('id, email, is_active')
+    .eq('email', user.email)
+    .eq('is_active', true)
+    .single();
 
-  return { valid: isAdmin, user };
+  console.log('📊 Admin query result:', { adminUser, adminError });
+
+  if (adminError || !adminUser) {
+    console.log('❌ User not found in admin_users table:', user.email, 'Error:', adminError);
+    return { valid: false, user };
+  }
+
+  console.log('✅ Admin user validated:', adminUser.email);
+  return { valid: true, user };
 }
 
 serve(async (req) => {
@@ -96,11 +109,7 @@ serve(async (req) => {
       case 'GET':
         return await handleGetRequests(action, url.searchParams);
       case 'POST':
-        return await handleCreateCoupon(req, user.id);
-      case 'PUT':
-        return await handleUpdateCoupon(req, user.id);
-      case 'DELETE':
-        return await handleDeleteCoupon(url.searchParams);
+        return await handlePostRequests(req, user.id);
       default:
         return new Response(JSON.stringify({ error: 'Method not allowed' }), {
           status: 405,
@@ -129,6 +138,8 @@ async function handleGetRequests(action: string, params: URLSearchParams) {
       return await getCouponUsageDetails(params);
     case 'analytics':
       return await getCouponAnalytics(params);
+    case 'check-admin':
+      return await checkAdminStatus();
     default:
       return new Response(JSON.stringify({ error: 'Invalid action' }), {
         status: 400,
@@ -194,6 +205,41 @@ async function listCoupons(params: URLSearchParams) {
     status: 200,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
+}
+
+async function handlePostRequests(req: Request, adminUserId: string) {
+  console.log('📤 Handling POST request...');
+  
+  let requestBody: any;
+  try {
+    const bodyText = await req.text();
+    requestBody = JSON.parse(bodyText);
+    console.log('📥 POST request body:', requestBody);
+  } catch (error) {
+    console.error('❌ Invalid request body:', error);
+    return new Response(JSON.stringify({ error: 'Invalid request body' }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  const { action, ...data } = requestBody;
+
+  switch (action) {
+    case 'create':
+      return await handleCreateCoupon(data, adminUserId);
+    case 'update':
+      return await handleUpdateCoupon(data, adminUserId);
+    case 'delete':
+      return await handleDeleteCoupon(data.id);
+    case 'toggle-status':
+      return await handleToggleStatus(data.id, data.is_active);
+    default:
+      return new Response(JSON.stringify({ error: 'Invalid action' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+  }
 }
 
 async function getCouponStats(params: URLSearchParams) {
@@ -343,21 +389,9 @@ async function getCouponAnalytics(params: URLSearchParams) {
   });
 }
 
-async function handleCreateCoupon(req: Request, adminUserId: string) {
+async function handleCreateCoupon(requestBody: CouponCreateRequest, adminUserId: string) {
   console.log('➕ Creating new coupon...');
-  
-  let requestBody: CouponCreateRequest;
-  try {
-    const bodyText = await req.text();
-    requestBody = JSON.parse(bodyText);
-    console.log('📥 Create request:', requestBody);
-  } catch (error) {
-    console.error('❌ Invalid request body:', error);
-    return new Response(JSON.stringify({ error: 'Invalid request body' }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
+  console.log('📥 Create request:', requestBody);
 
   // Validate required fields
   const { code, type, usage_limit } = requestBody;
@@ -433,21 +467,9 @@ async function handleCreateCoupon(req: Request, adminUserId: string) {
   });
 }
 
-async function handleUpdateCoupon(req: Request, adminUserId: string) {
+async function handleUpdateCoupon(requestBody: CouponUpdateRequest, adminUserId: string) {
   console.log('📝 Updating coupon...');
-  
-  let requestBody: CouponUpdateRequest;
-  try {
-    const bodyText = await req.text();
-    requestBody = JSON.parse(bodyText);
-    console.log('📥 Update request:', requestBody);
-  } catch (error) {
-    console.error('❌ Invalid request body:', error);
-    return new Response(JSON.stringify({ error: 'Invalid request body' }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
+  console.log('📥 Update request:', requestBody);
 
   const { id, ...updateData } = requestBody;
   if (!id) {
@@ -486,10 +508,9 @@ async function handleUpdateCoupon(req: Request, adminUserId: string) {
   });
 }
 
-async function handleDeleteCoupon(params: URLSearchParams) {
+async function handleDeleteCoupon(id: string) {
   console.log('🗑️ Deleting coupon...');
   
-  const id = params.get('id');
   if (!id) {
     return new Response(JSON.stringify({ error: 'Coupon ID is required' }), {
       status: 400,
@@ -512,6 +533,56 @@ async function handleDeleteCoupon(params: URLSearchParams) {
 
   console.log('✅ Coupon deleted');
   return new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
+}
+
+async function handleToggleStatus(id: string, isActive: boolean) {
+  console.log('🔄 Toggling coupon status...', { id, isActive });
+  
+  if (!id) {
+    return new Response(JSON.stringify({ error: 'Coupon ID is required' }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  const { data: updatedCoupon, error } = await supabase
+    .from('coupons')
+    .update({ is_active: isActive })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error toggling coupon status:', error);
+    return new Response(JSON.stringify({ error: 'Failed to update coupon status' }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  if (!updatedCoupon) {
+    return new Response(JSON.stringify({ error: 'Coupon not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  console.log('✅ Coupon status updated:', updatedCoupon.code);
+  return new Response(JSON.stringify({ coupon: updatedCoupon }), {
+    status: 200,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
+}
+
+async function checkAdminStatus() {
+  console.log('🔍 Checking admin status (this endpoint validates admin access automatically)');
+  
+  // If we reach this point, the user has already passed admin validation
+  // The validateAdminAccess function runs before any action handler
+  return new Response(JSON.stringify({ isAdmin: true }), {
     status: 200,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });

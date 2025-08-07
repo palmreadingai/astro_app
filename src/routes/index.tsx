@@ -1,4 +1,4 @@
-import { lazy } from 'react';
+import { lazy, Suspense } from 'react';
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import Layout from '../components/Layout/Layout';
@@ -23,6 +23,10 @@ const FeedbackPage = lazy(() => import('../components/Feedback/FeedbackPage'));
 const PricingPage = lazy(() => import('../components/Pricing/PricingPage'));
 const PaymentSuccess = lazy(() => import('../components/Pricing/PaymentSuccess'));
 const PaymentFailure = lazy(() => import('../components/Pricing/PaymentFailure'));
+
+// Admin components
+const AdminDashboard = lazy(() => import('../components/Admin/AdminDashboard'));
+import AdminGuard from '../components/Admin/AdminGuard';
 
 // Protected Route Component
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -178,6 +182,18 @@ export const router = createBrowserRouter([
   {
     path: '/contact',
     element: <ContactPage />,
+  },
+  {
+    path: '/admin',
+    element: (
+      <AdminGuard>
+        <Layout>
+          <Suspense fallback={<div className="min-h-screen flex items-center justify-center">Loading...</div>}>
+            <AdminDashboard />
+          </Suspense>
+        </Layout>
+      </AdminGuard>
+    ),
   },
   {
     path: '*',
