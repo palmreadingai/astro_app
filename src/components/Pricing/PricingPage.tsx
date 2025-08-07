@@ -2,9 +2,25 @@ import { Crown, Check, Star, Sparkles, ChevronDown, ChevronUp, Loader2, Info } f
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppStore } from '../../stores/appStore';
-import { processPayment } from '../../services/paymentService';
+import { processPayment, formatPrice } from '../../services/paymentService';
 import { usePayment } from '../../context/PaymentContext';
 import Footer from '../Layout/Footer';
+import CouponInput from '../Coupon/CouponInput';
+import CouponDisplay from '../Coupon/CouponDisplay';
+
+// Define coupon interfaces
+interface AppliedCoupon {
+  code: string;
+  type: 'discount' | 'free';
+  discount?: {
+    type: 'percentage' | 'amount' | 'free';
+    value: number;
+    originalAmount: number;
+    discountAmount: number;
+    finalAmount: number;
+    currency: string;
+  };
+}
 
 export default function PricingPage() {
   const navigate = useNavigate();
@@ -16,6 +32,10 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const [isIndia, setIsIndia] = useState(true);
   const [isLocationLoading, setIsLocationLoading] = useState(true);
+  
+  // Coupon state
+  const [appliedCoupon, setAppliedCoupon] = useState<AppliedCoupon | null>(null);
+  const [showCouponSuccess, setShowCouponSuccess] = useState(false);
 
   // Detect user's country/currency
   useEffect(() => {
@@ -64,11 +84,20 @@ export default function PricingPage() {
     setError(null);
 
     try {
-      const result = await processPayment();
+      const result = await processPayment(appliedCoupon?.code);
       
       if (result.success) {
-        // Payment successful, navigate to success page
-        navigate('/payment-success');
+        // For free coupons, user gets immediate access
+        if (result.message && result.coupon?.type === 'free') {
+          setShowCouponSuccess(true);
+          // Refresh payment status to update the context
+          setTimeout(() => {
+            window.location.reload(); // Refresh to update payment status
+          }, 2000);
+        } else {
+          // Regular payment or discount coupon - navigate to success page
+          navigate('/payment-success');
+        }
       } else {
         setError(result.error || 'Payment failed');
       }
@@ -79,11 +108,58 @@ export default function PricingPage() {
     }
   };
 
+  const handleCouponApplied = (coupon: AppliedCoupon) => {
+    setAppliedCoupon(coupon);
+    setError(null);
+    console.log('✅ Coupon applied:', coupon);
+  };
+
+  const handleCouponRemoved = () => {
+    setAppliedCoupon(null);
+    setError(null);
+    console.log('🗑️ Coupon removed');
+  };
+
+  // Calculate pricing with coupon
+  const getOriginalAmount = () => {
+    return isIndia ? 9900 : 199; // in paise/cents
+  };
+  
+  const getFinalAmount = () => {
+    if (appliedCoupon?.discount) {
+      return appliedCoupon.discount.finalAmount;
+    }
+    return getOriginalAmount();
+  };
+  
+  const getCurrency = () => {
+    return isIndia ? 'INR' : 'USD';
+  };
+  
+  const getDisplayPrice = () => {
+    if (appliedCoupon?.type === 'free') {
+      return 'FREE';
+    }
+    return formatPrice(getFinalAmount(), getCurrency());
+  };
+  
+  const getOriginalDisplayPrice = () => {
+    return formatPrice(getOriginalAmount(), getCurrency());
+  };
+
   const getButtonText = () => {
     if (isCheckingPayment) return 'Checking...';
     if (!user) return 'Sign In to Continue';
     if (hasPaid) return 'Go to Dashboard';
-    if (isLoading) return 'Processing...';
+    if (isLoading) {
+      if (appliedCoupon?.type === 'free') {
+        return 'Activating Free Access...';
+      }
+      return 'Processing...';
+    }
+    if (appliedCoupon?.type === 'free') {
+      return 'Activate Free Access';
+    }
     return 'Get Started Now';
   };
 
@@ -209,16 +285,32 @@ export default function PricingPage() {
                   <div className="flex items-center justify-center gap-3 mb-1">
                     <div className="flex flex-col items-end">
                       <span className="text-lg text-gray-400 line-through leading-none">
-                        {isIndia ? '₹999' : '$9.99'}
+                        {appliedCoupon && getFinalAmount() < getOriginalAmount() ? 
+                          getOriginalDisplayPrice() : 
+                          (isIndia ? '₹999' : '$9.99')
+                        }
                       </span>
                     </div>
                     <span className="text-6xl font-bold text-white">
-                      {isIndia ? '₹99' : '$1.99'}
+                      {appliedCoupon?.type === 'free' ? 'FREE' : getDisplayPrice()}
                     </span>
                     <div className="w-16"></div>
                   </div>
-                  <div className="inline-block bg-gradient-to-r from-red-500 to-pink-500 text-white text-sm font-bold px-3 py-1 rounded-full">
-                    90% OFF
+                  <div className="flex justify-center gap-2">
+                    {!appliedCoupon && (
+                      <div className="inline-block bg-gradient-to-r from-red-500 to-pink-500 text-white text-sm font-bold px-3 py-1 rounded-full">
+                        90% OFF
+                      </div>
+                    )}
+                    {appliedCoupon && (
+                      <div className="inline-block bg-gradient-to-r from-green-500 to-emerald-500 text-white text-sm font-bold px-3 py-1 rounded-full">
+                        {appliedCoupon.type === 'free' ? 'FREE ACCESS' : 
+                         appliedCoupon.discount?.type === 'percentage' ? 
+                         `${appliedCoupon.discount.value}% OFF` :
+                         `${getCurrency() === 'INR' ? '₹' : '$'}${appliedCoupon.discount?.value} OFF`
+                        }
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -266,6 +358,36 @@ export default function PricingPage() {
               ))}
             </div>
 
+            {/* Coupon Section */}
+            {!hasPaid && (
+              <div className="mb-6">
+                {appliedCoupon ? (
+                  <CouponDisplay
+                    coupon={appliedCoupon}
+                    originalAmount={getOriginalAmount()}
+                    finalAmount={getFinalAmount()}
+                    currency={getCurrency()}
+                    onRemove={handleCouponRemoved}
+                  />
+                ) : (
+                  <CouponInput
+                    onCouponApplied={handleCouponApplied}
+                    onCouponRemoved={handleCouponRemoved}
+                    disabled={isLoading || isCheckingPayment}
+                    appliedCoupon={appliedCoupon}
+                  />
+                )}
+              </div>
+            )}
+
+            {/* Free Coupon Success Message */}
+            {showCouponSuccess && appliedCoupon?.type === 'free' && (
+              <div className="mb-6 p-4 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/30 rounded-xl text-center">
+                <div className="text-2xl mb-2">🎉</div>
+                <h3 className="text-lg font-bold text-green-200 mb-1">Congratulations!</h3>
+                <p className="text-green-300 text-sm">Your free access has been activated. Redirecting you to the dashboard...</p>
+              </div>
+            )}
 
             {/* CTA Button */}
             {!hasPaid && (

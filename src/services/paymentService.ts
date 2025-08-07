@@ -3,11 +3,18 @@ import { supabase } from '../integrations/supabase/client';
 interface PaymentResult {
   success: boolean;
   error?: string;
+  message?: string;
   orderData?: {
     orderId: string;
     amount: number;
     currency: string;
     keyId: string;
+    coupon?: CouponInfo;
+    pricing?: PricingInfo;
+  };
+  coupon?: {
+    code: string;
+    type: string;
   };
 }
 
@@ -67,6 +74,58 @@ interface PaymentStatusResult {
   status?: PaymentStatus;
 }
 
+// Coupon related interfaces
+interface CouponInfo {
+  code: string;
+  type: 'discount' | 'free';
+  discount_type?: 'percentage' | 'amount';
+  discount_value?: number;
+  discount_amount?: number;
+  original_price?: number;
+  final_price?: number;
+}
+
+interface PricingInfo {
+  original_amount: number;
+  discount_amount: number;
+  final_amount: number;
+  currency: string;
+}
+
+interface CouponValidationResult {
+  success: boolean;
+  error?: string;
+  coupon?: {
+    id: string;
+    code: string;
+    type: 'discount' | 'free';
+    discount_type?: 'percentage' | 'amount';
+    discount_value?: number;
+    currency?: string;
+  };
+  discount?: {
+    type: 'percentage' | 'amount' | 'free';
+    value: number;
+    originalAmount: number;
+    discountAmount: number;
+    finalAmount: number;
+    currency: string;
+  };
+}
+
+interface AppliedCoupon {
+  code: string;
+  type: 'discount' | 'free';
+  discount?: {
+    type: 'percentage' | 'amount' | 'free';
+    value: number;
+    originalAmount: number;
+    discountAmount: number;
+    finalAmount: number;
+    currency: string;
+  };
+}
+
 const loadRazorpayScript = (): Promise<boolean> => {
   return new Promise((resolve) => {
     if (window.Razorpay) {
@@ -87,7 +146,62 @@ const loadRazorpayScript = (): Promise<boolean> => {
   });
 };
 
-export const initiatePayment = async (): Promise<PaymentResult> => {
+export const validateCoupon = async (couponCode: string): Promise<CouponValidationResult> => {
+  try {
+    console.log('🎫 Validating coupon:', couponCode);
+    
+    // Get current session for authentication
+    const { data: { session } } = await supabase.auth.getSession();
+    
+    if (!session) {
+      return { success: false, error: 'No active session' };
+    }
+
+    // Detect user's country for pricing
+    let userCountry = 'IN';
+    try {
+      const locationResponse = await fetch('https://ipapi.co/json/');
+      const locationData = await locationResponse.json();
+      userCountry = locationData.country_code || 'IN';
+    } catch {
+      userCountry = 'IN';
+    }
+
+    // Call the validate-coupon edge function
+    const { data: result, error } = await supabase.functions.invoke('validate-coupon', {
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: {
+        couponCode: couponCode.trim().toUpperCase(),
+        userCountry
+      }
+    });
+
+    if (error) {
+      console.error('❌ Error validating coupon:', error);
+      return { success: false, error: error.message || 'Failed to validate coupon' };
+    }
+
+    if (!result?.isValid) {
+      console.log('❌ Coupon invalid:', result?.error);
+      return { success: false, error: result?.error || 'Invalid coupon code' };
+    }
+
+    console.log('✅ Coupon validated successfully:', result);
+    return {
+      success: true,
+      coupon: result.coupon,
+      discount: result.discount
+    };
+
+  } catch (error) {
+    console.error('❌ Error in validateCoupon:', error);
+    return { success: false, error: 'Network error occurred' };
+  }
+};
+
+export const initiatePayment = async (couponCode?: string): Promise<PaymentResult> => {
   try {
     // Load Razorpay script
     const scriptLoaded = await loadRazorpayScript();
@@ -116,18 +230,32 @@ export const initiatePayment = async (): Promise<PaymentResult> => {
     }
 
     // Call the create-payment edge function
+    const requestBody: any = { country: userCountry };
+    if (couponCode) {
+      requestBody.couponCode = couponCode.trim().toUpperCase();
+      console.log('🎫 Including coupon in payment:', requestBody.couponCode);
+    }
+
     const { data: result, error } = await supabase.functions.invoke('create-payment', {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
       },
-      body: {
-        country: userCountry
-      }
+      body: requestBody
     });
 
     if (error) {
       console.error('❌ Error creating payment:', error);
       return { success: false, error: error.message || 'Failed to create payment' };
+    }
+
+    // Handle free coupon response (no order created)
+    if (result?.success && result?.message && !result?.orderId) {
+      console.log('✅ Free coupon processed:', result.message);
+      return { 
+        success: true, 
+        message: result.message,
+        coupon: result.coupon
+      };
     }
 
     if (!result?.orderId) {
@@ -157,7 +285,9 @@ export const openRazorpayCheckout = async (orderData: OrderData): Promise<Paymen
       currency: orderData.currency,
       order_id: orderData.orderId,
       name: 'PalmAI',
-      description: 'Lifetime Access to All Astrology Features',
+      description: orderData.coupon ? 
+        `Lifetime Access - ${formatDiscount(orderData.coupon)} Applied` : 
+        'Lifetime Access to All Astrology Features',
       handler: async (response: RazorpayResponse) => {
         // Payment successful, refresh payment status
         await refreshPaymentStatus();
@@ -226,14 +356,26 @@ export const refreshPaymentStatus = async (): Promise<PaymentStatusResult> => {
   return await checkPaymentStatus();
 };
 
-export const processPayment = async (): Promise<PaymentResult> => {
+export const processPayment = async (couponCode?: string): Promise<PaymentResult> => {
   try {
-    // First, initiate payment to get order data
-    const paymentResult = await initiatePayment();
+    // First, initiate payment to get order data (or handle free coupon)
+    const paymentResult = await initiatePayment(couponCode);
     
-    if (!paymentResult.success || !paymentResult.orderData) {
+    if (!paymentResult.success) {
       console.error('❌ Payment initiation failed:', paymentResult.error);
       return paymentResult;
+    }
+
+    // If it's a free coupon, return success immediately
+    if (paymentResult.message && !paymentResult.orderData) {
+      console.log('✅ Free coupon processed successfully');
+      return paymentResult;
+    }
+
+    // For discount coupons or regular payments, proceed with Razorpay
+    if (!paymentResult.orderData) {
+      console.error('❌ No order data for payment processing');
+      return { success: false, error: 'No order data received' };
     }
 
     // Open Razorpay checkout
@@ -243,4 +385,31 @@ export const processPayment = async (): Promise<PaymentResult> => {
     console.error('❌ Error in processPayment:', error);
     return { success: false, error: 'Payment process failed' };
   }
+};
+
+// Helper function to format discount display
+export const formatDiscount = (discount: any): string => {
+  if (!discount) return '';
+  
+  if (discount.type === 'free') {
+    return 'FREE ACCESS';
+  }
+  
+  if (discount.type === 'percentage') {
+    return `${discount.value}% OFF`;
+  }
+  
+  if (discount.type === 'amount') {
+    const symbol = discount.currency === 'INR' ? '₹' : '$';
+    return `${symbol}${discount.value} OFF`;
+  }
+  
+  return 'DISCOUNT APPLIED';
+};
+
+// Helper function to format price display
+export const formatPrice = (amount: number, currency: string): string => {
+  const symbol = currency === 'INR' ? '₹' : '$';
+  const price = amount / (currency === 'INR' ? 100 : 100);
+  return currency === 'INR' ? `${symbol}${price}` : `${symbol}${price.toFixed(2)}`;
 };

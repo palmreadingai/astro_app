@@ -57,9 +57,11 @@ serve(async (req) => {
       });
     }
 
-    // Parse request body to get user's country/currency preference
+    // Parse request body to get user's country/currency preference and coupon
     let isIndia = true; // Default to India
     let userCountry = 'IN';
+    let couponCode = null;
+    let appliedCoupon = null;
     
     try {
       const requestBody = await req.text();
@@ -68,6 +70,10 @@ serve(async (req) => {
         if (body.country) {
           userCountry = body.country;
           isIndia = body.country === 'IN';
+        }
+        if (body.couponCode) {
+          couponCode = body.couponCode.trim().toUpperCase();
+          console.log('🎫 Coupon code provided:', couponCode);
         }
       }
     } catch (parseError) {
@@ -109,37 +115,107 @@ serve(async (req) => {
     
     console.log('💰 User needs to pay, proceeding...');
 
-    // Check for existing pending orders
-    console.log('🔍 Checking for existing pending orders...');
-    const { data: existingOrders } = await supabase
-      .from('orders')
-      .select('order_id')
-      .eq('user_id', user.id)
-      .eq('status', 'pending')
-      .limit(1);
+    // Handle coupon validation if provided
+    if (couponCode) {
+      console.log('🎟️ Validating coupon:', couponCode);
+      
+      // Use the database function to validate coupon
+      const { data: validationResult, error: validationError } = await supabase
+        .rpc('validate_coupon_code', {
+          p_code: couponCode,
+          p_user_id: user.id
+        });
 
-    // If there's a pending Razorpay order, check if it's still valid
-    if (existingOrders && existingOrders.length > 0) {
-      console.log('📋 Found existing pending order:', existingOrders[0].order_id);
-      try {
-        const existingOrder = await razorpay.orders.fetch(existingOrders[0].order_id);
-        if (existingOrder.status === 'created') {
-          console.log('✅ Existing order is still valid, returning it');
-          return new Response(JSON.stringify({ 
-            orderId: existingOrder.id,
-            amount: existingOrder.amount,
-            currency: existingOrder.currency,
-            keyId: Deno.env.get("RAZORPAY_KEY_ID")
-          }), {
-            status: 200,
+      if (validationError) {
+        console.error('❌ Coupon validation error:', validationError);
+        return new Response(JSON.stringify({ error: 'Coupon validation failed' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      if (!validationResult || validationResult.length === 0 || !validationResult[0].is_valid) {
+        const errorMessage = validationResult?.[0]?.error_message || 'Invalid coupon code';
+        console.log('❌ Coupon invalid:', errorMessage);
+        return new Response(JSON.stringify({ error: errorMessage }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      const couponData = validationResult[0];
+      appliedCoupon = couponData;
+      console.log('✅ Coupon validated successfully:', appliedCoupon);
+      console.log('🔍 Coupon details - Type:', appliedCoupon.type, 'Discount Type:', appliedCoupon.discount_type, 'Value:', appliedCoupon.discount_value, 'Currency:', appliedCoupon.currency);
+      
+      // Handle free coupons - bypass payment entirely
+      if (appliedCoupon.type === 'free') {
+        console.log('🆓 Free coupon detected - bypassing payment...');
+        
+        // Create usage record
+        const { error: usageError } = await supabase
+          .from('coupon_usages')
+          .insert({
+            coupon_id: appliedCoupon.coupon_id,
+            user_id: user.id,
+            order_id: null, // No order for free coupons
+            discount_applied: isIndia ? 99.00 : 1.99, // Full amount as discount
+            original_amount: isIndia ? 9900 : 199,
+            final_amount: 0,
+            currency: isIndia ? 'INR' : 'USD',
+            ip_address: req.headers.get('x-forwarded-for'),
+            user_agent: req.headers.get('user-agent')
+          });
+
+        if (usageError) {
+          console.error('❌ Error creating coupon usage record:', usageError);
+          return new Response(JSON.stringify({ error: 'Failed to apply coupon' }), {
+            status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } catch (error) {
-        console.log('❌ Previous order no longer valid, creating new one:', error);
+
+        // Increment coupon usage count
+        const { data: incrementResult, error: incrementError } = await supabase
+          .rpc('increment_coupon_usage', { coupon_id: appliedCoupon.coupon_id });
+
+        if (incrementError || !incrementResult) {
+          console.error('❌ Error incrementing coupon usage:', incrementError);
+          // Continue anyway, usage record is created
+        }
+
+        // Update user profile to mark as paid
+        const { error: profileError } = await supabase
+          .from('profiles')
+          .update({ 
+            has_paid: true,
+            payment_verified_at: new Date().toISOString()
+          })
+          .eq('id', user.id);
+
+        if (profileError) {
+          console.error('❌ Error updating profile:', profileError);
+          return new Response(JSON.stringify({ error: 'Failed to activate premium access' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        console.log('✅ Free coupon processed successfully - user has premium access');
+        return new Response(JSON.stringify({ 
+          success: true,
+          message: 'Premium access activated with coupon!',
+          coupon: {
+            code: appliedCoupon.code,
+            type: 'free'
+          }
+        }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
       }
     }
-    
+
     console.log('🆕 Creating new Razorpay order...');
 
     // Create new Razorpay order
@@ -152,15 +228,63 @@ serve(async (req) => {
     
     console.log('📄 Generated receipt:', receipt, '(length:', receipt.length, ')');
     
-    // Set pricing based on user's location
-    const amount = isIndia ? 9900 : 199; // ₹99 for India (in paise), $1.99 for global (in cents)
+    // Set pricing based on user's location and apply coupon discount
+    let originalAmount = isIndia ? 9900 : 199; // ₹99 for India (in paise), $1.99 for global (in cents)
+    let finalAmount = originalAmount;
+    let discountAmount = 0;
     const currency = isIndia ? "INR" : "USD";
-    const priceDisplay = isIndia ? "₹99" : "$1.99";
+    let priceDisplay = isIndia ? "₹99" : "$1.99";
+    let couponInfo = null;
+
+    // Apply coupon discount if valid discount coupon
+    if (appliedCoupon && appliedCoupon.type === 'discount') {
+      console.log('💸 Applying discount coupon...');
+      console.log('🔍 Before discount - Original Amount:', originalAmount, 'paise');
+      
+      if (appliedCoupon.discount_type === 'percentage') {
+        // Percentage discount applies to any currency
+        discountAmount = Math.round((originalAmount * appliedCoupon.discount_value) / 100);
+        console.log('📊 Percentage discount:', appliedCoupon.discount_value + '%', 'Amount:', discountAmount);
+      } else if (appliedCoupon.discount_type === 'amount') {
+        // Amount discount - check currency compatibility
+        if (appliedCoupon.currency === currency) {
+          // Convert to paise/cents for calculation
+          discountAmount = Math.round(appliedCoupon.discount_value * (currency === 'INR' ? 100 : 100));
+          console.log('💰 Amount discount:', appliedCoupon.discount_value, appliedCoupon.currency, 'Amount:', discountAmount);
+        } else {
+          console.log('❌ Currency mismatch:', appliedCoupon.currency, 'vs', currency);
+          return new Response(JSON.stringify({ error: 'Coupon not applicable for your region' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      }
+      
+      // Ensure discount doesn't exceed original amount
+      discountAmount = Math.min(discountAmount, originalAmount);
+      finalAmount = Math.max(0, originalAmount - discountAmount);
+      
+      // Update price display
+      const finalPrice = finalAmount / (currency === 'INR' ? 100 : 100);
+      priceDisplay = currency === 'INR' ? `₹${finalPrice}` : `$${finalPrice.toFixed(2)}`;
+      
+      couponInfo = {
+        code: appliedCoupon.code,
+        type: 'discount',
+        discount_type: appliedCoupon.discount_type,
+        discount_value: appliedCoupon.discount_value,
+        discount_amount: discountAmount / (currency === 'INR' ? 100 : 100),
+        original_price: originalAmount / (currency === 'INR' ? 100 : 100),
+        final_price: finalPrice
+      };
+      
+      console.log('💳 Final pricing - Original:', originalAmount, 'Discount:', discountAmount, 'Final:', finalAmount);
+    }
     
-    console.log('💰 Pricing for', userCountry + ':', priceDisplay, '| Amount:', amount, '| Currency:', currency);
+    console.log('💰 Pricing for', userCountry + ':', priceDisplay, '| Amount:', finalAmount, '| Currency:', currency);
     
     const orderData = {
-      amount: amount,
+      amount: finalAmount,
       currency: currency,
       receipt: receipt,
       notes: {
@@ -168,7 +292,11 @@ serve(async (req) => {
         user_email: user.email || '',
         product: "PalmAI - Lifetime Access",
         country: userCountry,
-        price: priceDisplay
+        price: priceDisplay,
+        original_amount: originalAmount,
+        discount_amount: discountAmount,
+        coupon_code: couponCode || '',
+        coupon_applied: !!appliedCoupon
       },
     };
     
@@ -232,20 +360,55 @@ serve(async (req) => {
     console.log('💾 Database record data:', {
       user_id: user.id,
       order_id: order.id,
-      amount: amount,
+      amount: finalAmount,
       currency: currency,
       status: 'pending',
     });
     
-    const { error: insertError } = await supabase
+    const { data: newOrder, error: insertError } = await supabase
       .from('orders')
       .insert({
         user_id: user.id,
         order_id: order.id,
-        amount: amount,
+        amount: finalAmount,
         currency: currency,
         status: 'pending',
-      });
+      })
+      .select()
+      .single();
+
+    if (!insertError && appliedCoupon && appliedCoupon.type === 'discount') {
+      // Create coupon usage record for discount coupon
+      console.log('📝 Creating coupon usage record...');
+      const { error: usageError } = await supabase
+        .from('coupon_usages')
+        .insert({
+          coupon_id: appliedCoupon.coupon_id,
+          user_id: user.id,
+          order_id: newOrder.id,
+          discount_applied: discountAmount / (currency === 'INR' ? 100 : 100),
+          original_amount: originalAmount,
+          final_amount: finalAmount,
+          currency: currency,
+          ip_address: req.headers.get('x-forwarded-for'),
+          user_agent: req.headers.get('user-agent')
+        });
+
+      if (usageError) {
+        console.error('❌ Error creating coupon usage record:', usageError);
+        // Don't fail the payment creation, just log the error
+      } else {
+        // Increment coupon usage count
+        const { data: incrementResult, error: incrementError } = await supabase
+          .rpc('increment_coupon_usage', { coupon_id: appliedCoupon.coupon_id });
+
+        if (incrementError || !incrementResult) {
+          console.error('❌ Error incrementing coupon usage:', incrementError);
+        } else {
+          console.log('✅ Coupon usage recorded and incremented');
+        }
+      }
+    }
 
     if (insertError) {
       console.error('❌ Failed to insert order:', insertError);
@@ -262,7 +425,14 @@ serve(async (req) => {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      keyId: Deno.env.get("RAZORPAY_KEY_ID")
+      keyId: Deno.env.get("RAZORPAY_KEY_ID"),
+      coupon: couponInfo,
+      pricing: {
+        original_amount: originalAmount,
+        discount_amount: discountAmount,
+        final_amount: finalAmount,
+        currency: currency
+      }
     };
     
     console.log('📤 Returning response:', responseData);

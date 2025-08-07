@@ -69,10 +69,10 @@ const handlePaymentCaptured = async (payment: RazorpayPayment) => {
       return;
     }
 
-    // Get the user_id from the order
+    // Get the user_id and order details from the order
     const { data: order } = await supabase
       .from('orders')
-      .select('user_id')
+      .select('id, user_id')
       .eq('order_id', orderId)
       .single();
 
@@ -96,6 +96,26 @@ const handlePaymentCaptured = async (payment: RazorpayPayment) => {
       console.log('Successfully processed payment for user:', order.user_id);
     }
 
+    // Update coupon usage record if exists (link to completed payment)
+    if (order.id) {
+      console.log('🎫 Checking for coupon usage to update...');
+      const { data: couponUsage, error: usageError } = await supabase
+        .from('coupon_usages')
+        .select('id, coupon_id')
+        .eq('order_id', order.id)
+        .eq('user_id', order.user_id)
+        .single();
+
+      if (couponUsage && !usageError) {
+        console.log('✅ Found coupon usage record, marking as completed');
+        // Coupon usage record exists and is now confirmed with successful payment
+        // No additional action needed as the record was created during order creation
+      } else if (usageError && usageError.code !== 'PGRST116') {
+        // Log error only if it's not "no rows returned" (which is expected for orders without coupons)
+        console.error('Error checking coupon usage:', usageError);
+      }
+    }
+
   } catch (error) {
     console.error('Error in handlePaymentCaptured:', error);
   }
@@ -111,6 +131,13 @@ const handlePaymentFailed = async (payment: RazorpayPayment) => {
       return;
     }
 
+    // Get order details first
+    const { data: order } = await supabase
+      .from('orders')
+      .select('id, user_id')
+      .eq('order_id', orderId)
+      .single();
+
     // Update order status to failed
     const { error } = await supabase
       .from('orders')
@@ -123,8 +150,52 @@ const handlePaymentFailed = async (payment: RazorpayPayment) => {
 
     if (error) {
       console.error('Error updating failed payment:', error);
-    } else {
-      console.log('Successfully marked payment as failed for order:', orderId);
+      return;
+    }
+
+    console.log('Successfully marked payment as failed for order:', orderId);
+
+    // Handle coupon usage cleanup for failed payments
+    if (order?.id && order?.user_id) {
+      console.log('🎫 Handling coupon cleanup for failed payment...');
+      
+      // Find coupon usage record for this failed order
+      const { data: couponUsage } = await supabase
+        .from('coupon_usages')
+        .select('coupon_id')
+        .eq('order_id', order.id)
+        .eq('user_id', order.user_id)
+        .single();
+
+      if (couponUsage) {
+        console.log('🔄 Reversing coupon usage for failed payment...');
+        
+        // Delete the coupon usage record since payment failed
+        const { error: deleteError } = await supabase
+          .from('coupon_usages')
+          .delete()
+          .eq('order_id', order.id)
+          .eq('user_id', order.user_id);
+
+        if (!deleteError) {
+          // Decrement coupon usage count
+          const { error: decrementError } = await supabase
+            .from('coupons')
+            .update({ 
+              current_usage: Math.max(0, supabase.rpc('current_usage') - 1),
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', couponUsage.coupon_id);
+
+          if (decrementError) {
+            console.error('Error decrementing coupon usage:', decrementError);
+          } else {
+            console.log('✅ Coupon usage reversed successfully');
+          }
+        } else {
+          console.error('Error deleting coupon usage record:', deleteError);
+        }
+      }
     }
 
   } catch (error) {
@@ -151,10 +222,10 @@ const handleOrderPaid = async (order: RazorpayOrder) => {
       return;
     }
 
-    // Get the user_id from the order
+    // Get the user_id and internal order ID from the order
     const { data: dbOrder } = await supabase
       .from('orders')
-      .select('user_id')
+      .select('id, user_id')
       .eq('order_id', order.id)
       .single();
 
@@ -176,6 +247,22 @@ const handleOrderPaid = async (order: RazorpayOrder) => {
       console.error('Error updating profile:', profileError);
     } else {
       console.log('Successfully processed order payment for user:', dbOrder.user_id);
+    }
+
+    // Check and confirm coupon usage for this order (backup handler)
+    if (dbOrder.id) {
+      console.log('🎫 Confirming coupon usage for backup order paid handler...');
+      const { data: couponUsage } = await supabase
+        .from('coupon_usages')
+        .select('id')
+        .eq('order_id', dbOrder.id)
+        .eq('user_id', dbOrder.user_id)
+        .single();
+
+      if (couponUsage) {
+        console.log('✅ Coupon usage confirmed via backup handler');
+        // Coupon usage is already properly recorded, no additional action needed
+      }
     }
 
   } catch (error) {
