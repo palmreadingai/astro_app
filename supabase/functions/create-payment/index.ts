@@ -153,6 +153,7 @@ serve(async (req) => {
         console.log('🆓 Free coupon detected - bypassing payment...');
         
         // Create usage record
+        const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || req.headers.get('x-real-ip') || 'unknown';
         const { error: usageError } = await supabase
           .from('coupon_usages')
           .insert({
@@ -163,7 +164,7 @@ serve(async (req) => {
             original_amount: isIndia ? 9900 : 199,
             final_amount: 0,
             currency: isIndia ? 'INR' : 'USD',
-            ip_address: req.headers.get('x-forwarded-for'),
+            ip_address: clientIp,
             user_agent: req.headers.get('user-agent')
           });
 
@@ -380,6 +381,7 @@ serve(async (req) => {
     if (!insertError && appliedCoupon && appliedCoupon.type === 'discount') {
       // Create coupon usage record for discount coupon
       console.log('📝 Creating coupon usage record...');
+      const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || req.headers.get('x-real-ip') || 'unknown';
       const { error: usageError } = await supabase
         .from('coupon_usages')
         .insert({
@@ -390,7 +392,7 @@ serve(async (req) => {
           original_amount: originalAmount,
           final_amount: finalAmount,
           currency: currency,
-          ip_address: req.headers.get('x-forwarded-for'),
+          ip_address: clientIp,
           user_agent: req.headers.get('user-agent')
         });
 
