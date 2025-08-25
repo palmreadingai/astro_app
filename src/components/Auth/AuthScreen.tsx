@@ -175,7 +175,7 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
       } else if (error.code === 'invalid_credentials') {
         errorMessage = 'Invalid email or password. Please check your credentials.';
       } else if (error.code === 'email_not_confirmed') {
-        errorMessage = 'Please check your email and click the verification link.';
+        errorMessage = 'Your account is registered but not verified. Please check your email inbox and spam folder for the verification link to complete your registration.';
       } else if (error.code === 'weak_password') {
         errorMessage = 'Password must be at least 6 characters long.';
       } else if (error.code === 'email_address_invalid') {
