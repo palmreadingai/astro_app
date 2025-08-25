@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Eye, EyeOff, Mail, Lock, User, ArrowLeft, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Mail, Lock, User, ArrowLeft, Sparkles, CheckCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../integrations/supabase/client';
 import { useAppStore } from '../../stores/appStore';
@@ -23,6 +23,7 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [showSuccessCard, setShowSuccessCard] = useState(false);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -119,6 +120,7 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
         if (data.user && !data.session) {
           if (data.user.role === 'authenticated') {
             // Unverified user - email sent (new signup or existing unverified)
+            setShowSuccessCard(true);
             setMessage('Account created successfully! Please check your email and click the confirmation link to complete your registration.');
           } else {
             // Verified user - email enumeration protection
@@ -136,6 +138,7 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
           onSuccess?.();
           navigate('/home');
         } else {
+          setShowSuccessCard(true);
           setMessage('Account created successfully. Please check your email for verification.');
         }
       } else {
@@ -161,7 +164,7 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
           navigate('/home');
         }
       }
-    } catch (error: unknown) {
+    } catch (error: any) {
       console.error('Auth error details:', error);
       
       // Handle specific error types using error codes
@@ -177,6 +180,11 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
         errorMessage = 'Password must be at least 6 characters long.';
       } else if (error.code === 'email_address_invalid') {
         errorMessage = 'Please enter a valid email address.';
+      } else if (error.message && error.message.includes('For security purposes, you can only request this after')) {
+        // Handle rate limiting error - show the actual message from Supabase
+        errorMessage = error.message;
+      } else if (error.message && error.message.includes('Too Many Requests')) {
+        errorMessage = 'Too many signup attempts. Please wait a moment before trying again.';
       }
       
       setError(errorMessage);
@@ -230,19 +238,61 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
             </p>
           </div>
 
-          {error && (
+          {error && !showSuccessCard && (
             <div className="mb-4 p-3 bg-red-500/20 border border-red-400/30 rounded-lg backdrop-blur-sm">
               <p className="text-red-200 text-sm">{error}</p>
             </div>
           )}
 
-          {message && (
+          {message && !showSuccessCard && (
             <div className="mb-4 p-3 bg-blue-500/20 border border-blue-400/30 rounded-lg backdrop-blur-sm">
               <p className="text-blue-200 text-sm">{message}</p>
             </div>
           )}
 
-          {isForgotPassword ? (
+          {showSuccessCard ? (
+            <div className="text-center space-y-6">
+              {/* Success Icon */}
+              <div className="flex justify-center">
+                <div className="relative">
+                  <CheckCircle className="w-20 h-20 text-green-400 animate-pulse" />
+                  <div className="absolute -top-2 -right-2 w-6 h-6 bg-green-400 rounded-full animate-ping"></div>
+                </div>
+              </div>
+
+              {/* Success Message */}
+              <div className="space-y-4">
+                <h2 className="text-2xl font-bold text-white">
+                  Account Created Successfully!
+                </h2>
+                <div className="p-4 bg-green-500/20 border border-green-400/30 rounded-lg backdrop-blur-sm">
+                  <p className="text-green-200 text-lg leading-relaxed">
+                    {message}
+                  </p>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-center space-x-2 text-purple-200">
+                  <Mail className="w-5 h-5" />
+                  <span>Check your email inbox and spam folder</span>
+                </div>
+                
+                <button
+                  onClick={() => {
+                    setShowSuccessCard(false);
+                    setIsSignUp(false);
+                    setMessage(null);
+                    setFormData({ email: '', password: '', fullName: '' });
+                  }}
+                  className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white py-3 rounded-lg font-medium transition-all duration-300 transform hover:scale-105 shadow-lg"
+                >
+                  Go to Sign In
+                </button>
+              </div>
+            </div>
+          ) : isForgotPassword ? (
             <form onSubmit={handleForgotPassword} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-purple-200 mb-2">
@@ -364,8 +414,9 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
           </form>
           )}
 
-          <div className="mt-6 text-center">
-            {isForgotPassword ? (
+          {!showSuccessCard && (
+            <div className="mt-6 text-center">
+              {isForgotPassword ? (
               <div className="space-y-2">
                 <p className="text-purple-200 text-sm">
                   Remember your password?
@@ -399,8 +450,9 @@ export default function AuthScreen({ onSuccess }: AuthScreenProps) {
                   {isSignUp ? 'Sign In as Existing User' : 'Sign Up'}
                 </button>
               </>
+                )}
+              </div>
             )}
-          </div>
         </div>
       </div>
     </div>
